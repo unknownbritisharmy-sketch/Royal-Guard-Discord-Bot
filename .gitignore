@@ -1,0 +1,292 @@
+import os
+from datetime import datetime
+from typing import List
+
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+PREFIX = os.getenv("BOT_PREFIX", "!")
+OWNER_IDS = [int(x.strip()) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip()]
+DEFAULT_ROLE_ID = int(os.getenv("DEFAULT_ROLE_ID", "0") or 0)
+VERIFY_ROLE_ID = int(os.getenv("VERIFY_ROLE_ID", "0") or 0)
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or 0)
+
+intents = discord.Intents.default()
+intents.members = True
+intents.guilds = True
+intents.message_content = True
+
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned_or(PREFIX),
+    intents=intents,
+    help_command=None,
+)
+
+bot.start_time = datetime.utcnow()
+warnings_store = {}
+
+
+def get_warning_list(user_id: int) -> List[str]:
+    return warnings_store.setdefault(user_id, [])
+
+
+async def log_action(guild: discord.Guild, message: str):
+    if LOG_CHANNEL_ID == 0:
+        return
+
+    channel = guild.get_channel(LOG_CHANNEL_ID)
+    if channel is not None and isinstance(channel, discord.TextChannel):
+        await channel.send(message)
+
+
+async def get_or_create_muted_role(guild: discord.Guild) -> discord.Role:
+    muted_role = discord.utils.get(guild.roles, name="Muted")
+    if muted_role is None:
+        muted_role = await guild.create_role(name="Muted", reason="Created automatically for mute command")
+    return muted_role
+
+
+@bot.event
+async def on_ready():
+    print(f"Royal Guard Bot is online: {bot.user.name}#{bot.user.discriminator} ({bot.user.id})")
+    print(f"Prefix: {PREFIX}")
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name=f"{PREFIX}help | Royal Guard",
+        )
+    )
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if DEFAULT_ROLE_ID:
+        role = member.guild.get_role(DEFAULT_ROLE_ID)
+        if role:
+            await member.add_roles(role, reason="Default role assigned on join")
+
+    await log_action(member.guild, f"✅ {member.mention} joined the server.")
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    await log_action(member.guild, f"👋 {member.mention} left the server.")
+
+
+@bot.command(name="help")
+async def help_command(ctx):
+    embed = discord.Embed(
+        title="Royal Guard Command List",
+        description="Commands available to all members and staff.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="General",
+        value="`!help` `!ping` `!status` `!uptime` `!verify`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Moderation",
+        value="`!warn @user reason` `!warnings @user` `!kick @user reason` `!ban @user reason` `!unban username#tag` `!mute @user reason` `!unmute @user` `!clear 25`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Owner",
+        value="`!shutdown` `!restart`",
+        inline=False,
+    )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="ping")
+async def ping(ctx):
+    await ctx.send(f"🏓 Pong! Bot latency: {round(bot.latency * 1000)}ms")
+
+
+@bot.command(name="status")
+async def status(ctx):
+    await ctx.send(f"✅ Royal Guard Bot is online and ready for duty. Prefix: `{PREFIX}`")
+
+
+@bot.command(name="uptime")
+async def uptime(ctx):
+    current_time = datetime.utcnow()
+    delta = current_time - bot.start_time
+    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    await ctx.send(f"🕒 Uptime: {hours}h {minutes}m {seconds}s")
+
+
+@bot.command(name="verify")
+async def verify(ctx):
+    if VERIFY_ROLE_ID:
+        role = ctx.guild.get_role(VERIFY_ROLE_ID)
+        if role:
+            await ctx.author.add_roles(role, reason="Verification command")
+            await ctx.send(f"✅ {ctx.author.mention} has been verified.")
+            return
+
+    await ctx.send(f"✅ {ctx.author.mention} has been verified.")
+
+
+@bot.command(name="warn")
+@commands.has_permissions(manage_messages=True)
+async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    if member.bot:
+        await ctx.send("❌ You cannot warn a bot.")
+        return
+
+    warnings = get_warning_list(member.id)
+    warnings.append(f"{ctx.author.name}: {reason}")
+
+    await ctx.send(f"⚠️ {member.mention} has been warned for: `{reason}`")
+    await log_action(ctx.guild, f"⚠️ {member.mention} was warned by {ctx.author.mention}: {reason}")
+
+
+@bot.command(name="warnings")
+@commands.has_permissions(manage_messages=True)
+async def warnings(ctx, member: discord.Member):
+    entries = get_warning_list(member.id)
+    if not entries:
+        await ctx.send(f"📋 {member.mention} has no warnings.")
+        return
+
+    text = "\n".join(f"- {entry}" for entry in entries)
+    await ctx.send(f"📋 Warning history for {member.mention}:\n{text}")
+
+
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await member.kick(reason=reason)
+    await ctx.send(f"👢 {member.mention} was kicked. Reason: `{reason}`")
+    await log_action(ctx.guild, f"👢 {member.mention} was kicked by {ctx.author.mention}: {reason}")
+
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await member.ban(reason=reason)
+    await ctx.send(f"🔒 {member.mention} was banned. Reason: `{reason}`")
+    await log_action(ctx.guild, f"🔒 {member.mention} was banned by {ctx.author.mention}: {reason}")
+
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def unban(ctx, *, username: str):
+    try:
+        member = await commands.UserConverter().convert(ctx, username)
+    except commands.BadArgument:
+        await ctx.send("❌ Could not find that user. Use the full username and tag: `Name#1234`")
+        return
+
+    await ctx.guild.unban(member, reason="Unbanned by staff command")
+    await ctx.send(f"✅ {member.mention} was unbanned.")
+    await log_action(ctx.guild, f"✅ {member.mention} was unbanned by {ctx.author.mention}.")
+
+
+@bot.command(name="mute")
+@commands.has_permissions(manage_roles=True)
+async def mute(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    muted_role = await get_or_create_muted_role(ctx.guild)
+    if muted_role in member.roles:
+        await ctx.send(f"⚠️ {member.mention} is already muted.")
+        return
+
+    await member.add_roles(muted_role, reason=reason)
+    await ctx.send(f"🔇 {member.mention} has been muted. Reason: `{reason}`")
+    await log_action(ctx.guild, f"🔇 {member.mention} was muted by {ctx.author.mention}: {reason}")
+
+
+@bot.command(name="unmute")
+@commands.has_permissions(manage_roles=True)
+async def unmute(ctx, member: discord.Member):
+    muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if muted_role is None:
+        await ctx.send("⚠️ There is no Muted role in this server.")
+        return
+
+    if muted_role not in member.roles:
+        await ctx.send(f"⚠️ {member.mention} is not muted.")
+        return
+
+    await member.remove_roles(muted_role, reason="Unmute command")
+    await ctx.send(f"🔊 {member.mention} has been unmuted.")
+    await log_action(ctx.guild, f"🔊 {member.mention} was unmuted by {ctx.author.mention}.")
+
+
+@bot.command(name="clear")
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int = 10):
+    if amount < 1:
+        await ctx.send("❌ Please provide a number greater than zero.")
+        return
+
+    await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"✅ Cleared {amount} messages.", delete_after=3)
+
+
+@bot.command(name="role")
+@commands.has_permissions(manage_roles=True)
+async def role(ctx, member: discord.Member, *, role_name: str):
+    role = discord.utils.get(ctx.guild.roles, name=role_name)
+    if role is None:
+        await ctx.send(f"❌ I could not find a role named `{role_name}`.")
+        return
+
+    if role in member.roles:
+        await ctx.send(f"⚠️ {member.mention} already has the `{role_name}` role.")
+        return
+
+    await member.add_roles(role, reason=f"Role assigned via {ctx.command.name}")
+    await ctx.send(f"✅ Added `{role_name}` to {member.mention}.")
+
+
+@bot.command(name="shutdown")
+async def shutdown(ctx):
+    if ctx.author.id not in OWNER_IDS:
+        await ctx.send("❌ You are not allowed to use this command.")
+        return
+
+    await ctx.send("⚠️ Shutting down the bot...")
+    await bot.close()
+
+
+@bot.command(name="restart")
+async def restart(ctx):
+    if ctx.author.id not in OWNER_IDS:
+        await ctx.send("❌ You are not allowed to use this command.")
+        return
+
+    await ctx.send("🔄 Restarting the bot...")
+    await bot.close()
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument. Use `{PREFIX}help` for command usage.")
+        return
+
+    if isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ I could not find that member.")
+        return
+
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("❌ You do not have permission to use that command.")
+        return
+
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    print(f"Command error: {error}")
+
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise ValueError("DISCORD_TOKEN is missing. Add it to your .env file.")
+    bot.run(TOKEN)
